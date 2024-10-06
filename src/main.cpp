@@ -1,13 +1,19 @@
 #include "fsm.hpp"
+#include "test.hpp"
 
-using namespace zb::fsm;
+using namespace zb;
 
-int main(void) {
-  state_machine fsm;
-  fsm.state_(FSM_STATE_ID::init)
-      .in([](const state_event_args &arg) {})
-      .out([](const state_event_args &arg) {})
-      .on(FSM_EVENT_ID::timeout, [](const event_args &arg) {});
+int main(void) 
+{
+  fsm_<fsm_state_id> fsm;
+  fsm.config(fsm_state_id::init)
+      .in([](const fsm_::transit_arg &arg) {})
+      .out([](const fsm_::transit_arg &arg) {})
+      .on(FSM_EVENT_ID::timeout).then_([](const void* arg){})
+      .end_config()
+      ;
 
   return 0;
 }
+
+template zb::fsm_<fsm_state_id>;

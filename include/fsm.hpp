@@ -6,238 +6,238 @@
 #endif
 
 #include <functional>
-#include <tuple>
 #include <map>
-#include <stdint.h>
-#include <stdexcept>
-#include <mutex>
 #include <memory>
-#include "test.hpp"
+#include <vector>
+#include <string>
+#include <mutex>
+
+// TODO: use std::invoke to replace template, which requires c++17 ?
 
 namespace zb
 {
-    namespace fsm
+    template <
+        class Ty_state_id = int,
+        class Ty_event_id = int,
+        class Ty_event_arg = void*,
+        class Ty_predict = std::function<bool(const Ty_event_arg&)>,
+        class Ty_event_action = std::function<void(const Ty_event_arg&)>
+    >
+    class fsm_
     {
-
-#if !defined(FSM_STATE_ID)
-#define FSM_STATE_ID unsigned int
-#endif
-
-#if !defined(FSM_EVENT_ID)
-#define FSM_EVENT_ID unsigned int
-#endif
-
-        enum class fsm_state_event_id : unsigned int
+    private:
+        struct transit_arg
         {
-            nothing = 0,
-            entered,
-            leaving,
-            transit,
+            Ty_state_id prev;
+            Ty_state_id next;
+            Ty_event_id evnt;
         };
-
-        struct event_args
+        struct entity
         {
-            FSM_EVENT_ID id;
-            // define other properties in inherited class/struct
+            Ty_predict predict;
+            Ty_event_action act;
         };
-
-        struct state_event_args
-        {
-            fsm_state_event_id id;
-            FSM_STATE_ID prev;
-            FSM_STATE_ID next;
-        };
-
-        class state_machine;
 
         class state
         {
-            friend class state_machine;
+        private:
+
+            class thenable
+            {
+            public:
+                thenable& if_(const Ty_predict pred)
+                {
+                    _entity.predict = pred;
+                    return *this;
+                }
+                state& then_(const Ty_event_action fun)
+                {
+                    _entity.act = fun;
+                    return _state;
+                }
+                state& transit_(const Ty_state_id& state_id)
+                {
+                    _entity.act = [state_id](const Ty_event_arg& arg) {
+                        transit_arg arg;
+                        arg.prev = _state._id;
+                        arg.next = state_id;
+                        _state._fsm.transit_(arg);
+                    };
+                    return _state;
+                }
+
+            private:
+                thenable(state& s, entity& eh)
+                    : _state(s), _entity(eh)
+                { /* do nothing */
+                }
+
+                state& _state;
+                entity _entity;
+                // TODO: make _entity to entities to container thenables. 
+                // on(evt).if_().then_().elif_().then_().else_().then_();
+                // at this time being: on(e1).if_().then_().on(e1).if_().then_() for same event.
+            };
 
         public:
-            inline FSM_STATE_ID &id() noexcept { return myid; }
+            state(const Ty_state_id& id, const fsm_& ref)
+                : _id(id)
+                , _fsm(ref)
+                , _exit{}
+                , _entry{}
+                , _entities{}
+            { /* do nothing */
+            }
 
-            state &on(FSM_EVENT_ID &id, const std::function<void(const event_args &)> &action)
+            ~state()
             {
-                register_event_handler(id, action);
+                _thenable.reset();
+                _thenable = nullptr;
+                for (const auto& kvs : _entities)
+                {
+                    for (const auto& ent : kvs.second)
+                    {
+                        ent.second.act = nullptr;
+                    }
+                    kvs.second.clear();
+                }
+                _entities.clear();
+            }
+
+            state& in(const std::function<void(const Ty_event_id&, const Ty_state_id&)> handler)
+            {
+                _entry = handler;
                 return *this;
             }
 
-            state &off(const FSM_EVENT_ID &id)
+            thenable& out(const std::function<void(const Ty_event_id&, const Ty_state_id&> handler)
             {
-                unregister_event_handler(id);
+                _exit = handler;
                 return *this;
             }
 
-            state &in(const std::function<void(const state_event_args &)> &fn)
+            thenable& on(const Ty_event_id& id)
             {
-                register_state_event_handler(fsm_state_event_id::entered, fn);
-                return *this;
+                auto et = entity();
+                return make_thenable(_entities[id]);
             }
 
-            state &out(const std::function<void(const state_event_args &)> &fn)
+            fsm_& end_config()
             {
-                register_state_event_handler(fsm_state_event_id::leaving, fn);
-                return *this;
-            }
-
-            state &transit_on(const FSM_EVENT_ID &id, const FSM_STATE_ID &next_state)
-            {
-                register_event_handler(id, [this, &next_state](const event_args &) -> void
-                                       { this->transit(next_state); });
-                return *this;
+                return _fsm;
             }
 
         private:
-            state() = delete;
-            state(const FSM_STATE_ID &stid)
-                : event_locker{}, myid{stid}
+            const fsm_& _fsm;
+            Ty_state_id _id;
+            std::function<void(transit_arg arg)> _entry;
+            std::function<void(Ty_state_id next)> _exit;
+            std::shared_ptr<thenable> _thenable;
+            std::map<Ty_state_id, std::vector<entity>> _entities;
+
+            std::vector<entity> get_entity_list(const Ty_event_id& id)
             {
-            }
-
-            FSM_STATE_ID myid;
-            std::map<FSM_EVENT_ID, std::function<void(const event_args &)>> event_list;
-            std::map<fsm_state_event_id, std::function<void(const state_event_args &)>> state_event_list;
-            std::function<void(const state_event_args &)> request_transit;
-
-            std::mutex event_locker;
-
-            inline void set_transit_delegate(const std::function<void(const state_event_args &)> &fn)
-            {
-                std::lock_guard<std::mutex> lock(event_locker);
-                request_transit = fn;
-            }
-
-            // when registered handler for same event id, the last one takes effective
-            inline void register_state_event_handler(const fsm_state_event_id &id, const std::function<void(const state_event_args &)> &fn)
-            {
-                std::lock_guard<std::mutex> lock(event_locker);
-                state_event_list[id] = fn;
-            }
-
-            // when registered handler for same event id, the last one takes effective
-            void register_event_handler(const FSM_EVENT_ID &id, const std::function<void(const event_args &)> &fn)
-            {
-                std::lock_guard<std::mutex> lock(event_locker);
-                event_list[id] = fn;
-            }
-
-            void unregister_event_handler(const FSM_EVENT_ID &id)
-            {
-                std::lock_guard<std::mutex> lock(event_locker);
-                if (0 < event_list.count(id))
+                if (_entities.end() == _entities.find(id))
                 {
-                    event_list.erase(id);
+                    _entities[id] = std::vector<entity>();
                 }
+                return _entities[id];
             }
 
-            void transit(const FSM_STATE_ID &next_state)
+            entity& create_entity_to_list()
             {
-                std::lock_guard<std::mutex> lock(event_locker);
-                if (!request_transit)
-                    return;
-
-                state_event_args args{fsm_state_event_id::transit, myid, next_state};
-                request_transit(args);
+                return get_entity_list(_id).emplace_back(entity());
             }
 
-            void fire(const state_event_args &args)
+            thenable& make_thenable(entity& et)
             {
-                std::lock_guard<std::mutex> lock(event_locker);
-                if (0 >= state_event_list.count(args.id))
+                if (_thenable) _thenable.reset();
+                _thenable = std::make_shared<thenable>(*this, et);
+                return *_thenable;
+            }
+
+            void handle(const Ty_event_id& id, const Ty_event_arg& arg)
+            {
+                if (_entities.end() == _entities.finded(id)) return;
+                for (const auto& entity : _entities[id])
                 {
-                    return;
+                    if (entity.predict && !entity.predict(arg))
+                    {
+                        continue;
+                    }
+                    if (entity.act) entity.act(arg);
+                    break;      // perform one callback only.
                 }
-                state_event_list[args.id](args);
-            }
-
-            void fire(const event_args &args)
-            {
-                std::lock_guard<std::mutex> lock(event_locker);
-                if (0 >= event_list.count(args.id))
-                {
-                    return;
-                }
-                event_list[args.id](args);
             }
         };
 
-        class state_machine
+    public:
+        fsm_<Ty_state_id, Ty_event_id, Ty_event_arg, Ty_predict, Ty_event_action>() : _states{} {}
+
+        virtual ~fsm_()
         {
-        public:
-            state_machine()
-                : state_list{}, current_state{nullptr}
+            for (auto& state : _states)
             {
+                state.second.reset();
             }
-            ~state_machine() = default;
+            _states.clear();
+        }
 
-            state &state_(const FSM_STATE_ID &id)
+        state& config(Ty_state_id event_id)
+        {
+            if (_states.find(event_id) == _states.end())
             {
-                auto st = get(id);
-                if (nullptr != st)
-                {
-                    return *st;
-                }
-
-                struct _state : state
-                {
-                    _state(const FSM_STATE_ID &stid) : state(stid) {}
-                };
-
-                state_list[id] = std::make_shared<_state>(id);
-                state_list[id]->set_transit_delegate([this](const state_event_args &args)
-                                                     { this->transit(args); });
-                return *state_list[id];
+                _states[event_id] = std::make_shared<state>(event_id, *this);
             }
+            return *_states[event_id];
+        }
 
-            std::function<void(const event_args &)> listener()
-            {
-                return std::bind(&state_machine::event_listener, this, std::placeholders::_1);
-            }
+        void run(const Ty_state_id& init_state)
+        {
+            _current_id = init_state;
 
-            std::shared_ptr<state> current() noexcept
-            {
-                return current_state;
-            }
+            transit_arg transarg();
+            transarg.prev = _current_id;
+            transarg.next = _current_id;
 
-        private:
-            std::shared_ptr<state> current_state;
-            std::map<FSM_STATE_ID, std::shared_ptr<state>> state_list;
+            _current_state = _states[_current_id];
+            _current_state->entry_(transarg);
+        }
 
-            void event_listener(const event_args &args)
-            {
-                if (current_state)
-                {
-                    current_state->fire(args);
-                }
-            }
+        void pub(const Ty_event_id& event_id, const Ty_event_arg& arg)
+        {
+            if (!_current_state) return;
+            _current_state.handle(event_id, arg);
+        }
 
-            void transit(const state_event_args &args)
-            {
-                auto next = get(args.next);
-                if (!next)
-                    return;
+        Ty_event_id current()
+        {
+            return _current_id;
+        }
 
-                if (current_state)
-                {
-                    current_state->fire({fsm_state_event_id::leaving, args.prev, args.next});
-                }
-                current_state = next;
-                current_state->fire({fsm_state_event_id::entered, args.prev, args.next});
-            }
+    private:
+        Ty_state_id _current_id;
+        std::shared_ptr<state> _current_state;
+        std::map<Ty_event_id, std::shared_ptr<state>> _states;
 
-            std::shared_ptr<state> get(const FSM_STATE_ID &id) noexcept
-            {
-                std::shared_ptr<state> ret = nullptr;
-                if (state_list.count(id))
-                {
-                    ret = state_list[id];
-                }
-                return ret;
-            }
-        };
+        // when this private method is called, there must be a _current_state.
+        void transit_to(const transit_arg& arg)
+        {
+            if (arg.next == _current_id) return;
+            if (_states.find(arg.next) == _states.end()) return;
 
-    }
+            if (_current_state && _current_state._exit)
+                _current_state.exit_(arg);
+
+            _current_id = arg.next;
+            _current_state = _states[_current_id];
+
+            if (_current_state._entry)
+                _current_state._entry(arg);
+        }
+    };
+
+    using fsm_def = fsm_<>;
 }
 
 #ifdef __GNUC__

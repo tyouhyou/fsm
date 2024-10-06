@@ -15,4 +15,3 @@ enum class fsm_event_id : unsigned int {
   timeout,
   ended,
 };
-
